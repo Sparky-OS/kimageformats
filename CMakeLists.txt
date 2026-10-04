@@ -111,6 +111,12 @@ ecm_set_disabled_deprecation_versions(
 )
 
 add_subdirectory(src)
+
+install(FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/mime/kimageformats-stereo.xml"
+    DESTINATION "${KDE_INSTALL_DATADIR}/mime/packages"
+)
+
 if (BUILD_TESTING)
     add_subdirectory(autotests)
     add_subdirectory(tests)
