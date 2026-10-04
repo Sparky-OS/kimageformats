@@ -1,5 +1,11 @@
 include(ECMMarkAsTest)
 
+add_executable(stereotest stereotest.cpp)
+target_link_libraries(stereotest Qt6::Gui)
+ecm_mark_as_test(stereotest)
+add_test(NAME kimageformats-stereo COMMAND stereotest)
+set_tests_properties(kimageformats-stereo PROPERTIES ENVIRONMENT "QT_PLUGIN_PATH=${CMAKE_BINARY_DIR}/bin")
+
 add_definitions(-DPLUGIN_DIR="${CMAKE_CURRENT_BINARY_DIR}/../bin")
 remove_definitions(-DQT_NO_CAST_FROM_ASCII)
 

@@ -105,6 +105,10 @@ endif()
 
 ##################################
 
+kimageformats_add_plugin(kimg_stereo SOURCES stereo.cpp)
+
+##################################
+
 kimageformats_add_plugin(kimg_pcx SOURCES pcx.cpp scanlineconverter.cpp)
 
 ##################################
