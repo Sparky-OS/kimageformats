@@ -647,8 +647,9 @@ public:
             return Capabilities(CanRead | CanWrite);
         }
         if (format.isEmpty() && device && device->isReadable()) {
-            const JpegHeader header = readJpegHeader(device->peek(1024 * 1024));
-            if (header.valid && (header.jpsPresent || !header.mpf.isEmpty())) {
+            const QByteArray data = device->peek(1024 * 1024);
+            const JpegHeader header = readJpegHeader(data);
+            if (header.valid && (header.jpsPresent || (!header.mpf.isEmpty() && parseMpf(data)))) {
                 return CanRead;
             }
         }
@@ -662,8 +663,8 @@ public:
         if (isFormat(format, jpsFormat) || isFormat(format, mpoFormat)) {
             handler->setFormat(format);
         } else {
-            const JpegHeader header = readJpegHeader(device->peek(1024 * 1024));
-            handler->setFormat(header.mpf.isEmpty() ? QByteArray(jpsFormat.data(), jpsFormat.size()) : QByteArray(mpoFormat.data(), mpoFormat.size()));
+            const bool isMpo = bool(parseMpf(device->peek(1024 * 1024)));
+            handler->setFormat(isMpo ? QByteArray(mpoFormat.data(), mpoFormat.size()) : QByteArray(jpsFormat.data(), jpsFormat.size()));
         }
         return handler;
     }

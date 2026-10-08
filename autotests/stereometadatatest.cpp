@@ -99,6 +99,7 @@ private Q_SLOTS:
         QTest::newRow("mpo-left") << QStringLiteral("test_mpo_1_0.mpo") << QStringLiteral("multiViewLeftFirst") << 2;
         QTest::newRow("mpo-right") << QStringLiteral("test_mpo_1_1.mpo") << QStringLiteral("multiViewRightFirst") << 2;
         QTest::newRow("ordinary") << QStringLiteral("test_jps_unmarked.jpg") << QString() << 1;
+        QTest::newRow("unsupported-mpf") << QStringLiteral("test_mpo_badcount.mpo") << QString() << 1;
     }
 
     void contentDetection()
