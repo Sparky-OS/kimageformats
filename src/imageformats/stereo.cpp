@@ -641,10 +641,16 @@ class StereoPlugin final : public QImageIOPlugin
     Q_PLUGIN_METADATA(IID "org.qt-project.Qt.QImageIOHandlerFactoryInterface" FILE "stereo.json")
 
 public:
-    Capabilities capabilities(QIODevice *, const QByteArray &format) const override
+    Capabilities capabilities(QIODevice *device, const QByteArray &format) const override
     {
         if (isFormat(format, jpsFormat) || isFormat(format, mpoFormat)) {
             return Capabilities(CanRead | CanWrite);
+        }
+        if (format.isEmpty() && device && device->isReadable()) {
+            const JpegHeader header = readJpegHeader(device->peek(1024 * 1024));
+            if (header.valid && (header.jpsPresent || !header.mpf.isEmpty())) {
+                return CanRead;
+            }
         }
         return {};
     }
@@ -653,7 +659,12 @@ public:
     {
         auto *handler = new StereoHandler;
         handler->setDevice(device);
-        handler->setFormat(format);
+        if (isFormat(format, jpsFormat) || isFormat(format, mpoFormat)) {
+            handler->setFormat(format);
+        } else {
+            const JpegHeader header = readJpegHeader(device->peek(1024 * 1024));
+            handler->setFormat(header.mpf.isEmpty() ? QByteArray(jpsFormat.data(), jpsFormat.size()) : QByteArray(mpoFormat.data(), mpoFormat.size()));
+        }
         return handler;
     }
 };

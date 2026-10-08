@@ -89,6 +89,38 @@ private Q_SLOTS:
         QVERIFY(!reader.jumpToImage(2));
     }
 
+    void contentDetection_data()
+    {
+        QTest::addColumn<QString>("file");
+        QTest::addColumn<QString>("expected");
+        QTest::addColumn<int>("frames");
+        QTest::newRow("jps-left") << QStringLiteral("test_jps_2_1.jpg") << QStringLiteral("sideBySideLeftFirst") << 1;
+        QTest::newRow("jps-right") << QStringLiteral("test_jps_2_0.jpg") << QStringLiteral("sideBySideRightFirst") << 1;
+        QTest::newRow("mpo-left") << QStringLiteral("test_mpo_1_0.mpo") << QStringLiteral("multiViewLeftFirst") << 2;
+        QTest::newRow("mpo-right") << QStringLiteral("test_mpo_1_1.mpo") << QStringLiteral("multiViewRightFirst") << 2;
+        QTest::newRow("ordinary") << QStringLiteral("test_jps_unmarked.jpg") << QString() << 1;
+    }
+
+    void contentDetection()
+    {
+        QFETCH(QString, file);
+        QFETCH(QString, expected);
+        QFETCH(int, frames);
+        QFile input(QFINDTESTDATA("stereo/" + file));
+        QVERIFY(input.open(QIODevice::ReadOnly));
+        QByteArray data = input.readAll();
+        QBuffer buffer(&data);
+        QVERIFY(buffer.open(QIODevice::ReadOnly));
+        QImageReader reader(&buffer);
+        QCOMPARE(reader.text(QStringLiteral("Stereo3DLayout")), expected);
+        QCOMPARE(reader.imageCount(), frames);
+        QCOMPARE(reader.read().text(QStringLiteral("Stereo3DLayout")), expected);
+        QImageReader named(input.fileName());
+        named.setDecideFormatFromContent(true);
+        QCOMPARE(named.text(QStringLiteral("Stereo3DLayout")), expected);
+        QCOMPARE(named.imageCount(), frames);
+    }
+
     void writerViewpoints()
     {
         QImage source(32, 16, QImage::Format_RGB32);
