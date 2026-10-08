@@ -3,9 +3,16 @@
   <mime-type type="image/x-jps">
     <comment>JPS stereo image</comment>
     <glob pattern="*.jps"/>
+    <sub-class-of type="image/jpeg"/>
   </mime-type>
   <mime-type type="image/x-mpo">
     <comment>MPO stereo image</comment>
     <glob pattern="*.mpo"/>
+    <sub-class-of type="image/jpeg"/>
+  </mime-type>
+  <mime-type type="image/x-pns">
+    <comment>PNG stereo image</comment>
+    <glob pattern="*.pns"/>
+    <sub-class-of type="image/png"/>
   </mime-type>
 </mime-info>

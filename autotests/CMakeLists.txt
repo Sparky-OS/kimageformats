@@ -252,6 +252,12 @@ if(NOT TARGET Qt6::Test)
     return()
 endif()
 
+add_executable(stereometadatatest stereometadatatest.cpp)
+target_link_libraries(stereometadatatest Qt6::Gui Qt6::Test)
+ecm_mark_as_test(stereometadatatest)
+add_test(NAME kimageformats-stereo-metadata COMMAND stereometadatatest)
+set_tests_properties(kimageformats-stereo-metadata PROPERTIES ENVIRONMENT "QT_PLUGIN_PATH=${CMAKE_BINARY_DIR}/bin")
+
 add_executable(pictest pictest.cpp)
 target_link_libraries(pictest Qt6::Gui Qt6::Test)
 ecm_mark_as_test(pictest)

@@ -1,5 +1,6 @@
 /*
     SPDX-FileCopyrightText: 2026 The KDE Contributors
+    SPDX-FileCopyrightText: 2026 Daniel Campos Ramos <Capitain_Jack@yahoo.com>
 
     SPDX-License-Identifier: LGPL-2.1-or-later OR LGPL-3.0-or-later OR LicenseRef-KDE-Accepted-LGPL
 */
@@ -19,8 +20,24 @@ namespace
 constexpr QByteArrayView jpsFormat = "jps";
 constexpr QByteArrayView mpoFormat = "mpo";
 constexpr QByteArrayView stereoLayoutKey = "StereoLayout";
+constexpr QByteArrayView stereo3DLayoutKey = "Stereo3DLayout";
 constexpr QByteArrayView jpsLayout = "side-by-side; right eye first";
 constexpr QByteArrayView mpoLayout = "multi-picture object; left eye first";
+
+QString legacyLayout(const QString &layout)
+{
+    if (layout.startsWith(QStringLiteral("sideBySide"))) {
+        return layout.endsWith(QStringLiteral("LeftFirst")) ? QStringLiteral("side-by-side; left eye first") : QString::fromLatin1(jpsLayout);
+    }
+    if (layout.startsWith(QStringLiteral("topBottom"))) {
+        return layout.endsWith(QStringLiteral("LeftFirst")) ? QStringLiteral("top-and-bottom; left eye first")
+                                                            : QStringLiteral("top-and-bottom; right eye first");
+    }
+    if (layout.startsWith(QStringLiteral("multiView"))) {
+        return layout.endsWith(QStringLiteral("LeftFirst")) ? QString::fromLatin1(mpoLayout) : QStringLiteral("multi-picture object; right eye first");
+    }
+    return {};
+}
 
 bool isFormat(const QByteArray &format, QByteArrayView expected)
 {
@@ -32,6 +49,104 @@ struct MpfEntry {
     quint32 size = 0;
     quint32 offset = 0;
 };
+
+struct JpegHeader {
+    bool valid = false;
+    bool jpsPresent = false;
+    QByteArray jps;
+    QByteArray mpf;
+    qsizetype tiffOffset = 0;
+};
+
+JpegHeader readJpegHeader(const QByteArray &data)
+{
+    JpegHeader result;
+    if (!data.startsWith(QByteArrayLiteral("\xff\xd8"))) {
+        return result;
+    }
+    qsizetype offset = 2;
+    while (offset < data.size() && offset < 1024 * 1024) {
+        if (quint8(data.at(offset++)) != 0xff) {
+            return {};
+        }
+        while (offset < data.size() && quint8(data.at(offset)) == 0xff) {
+            ++offset;
+        }
+        if (offset >= data.size()) {
+            return {};
+        }
+        const quint8 marker = quint8(data.at(offset++));
+        if (marker == 0 || marker == 0xd8 || marker == 0xd9) {
+            return {};
+        }
+        if (marker == 1 || (marker >= 0xd0 && marker <= 0xd7)) {
+            continue;
+        }
+        if (offset > data.size() - 2) {
+            return {};
+        }
+        const quint16 length = qFromBigEndian<quint16>(data.constData() + offset);
+        if (length < 2 || length > data.size() - offset) {
+            return {};
+        }
+        if (marker == 0xda) {
+            result.valid = length >= 6;
+            return result;
+        }
+        const QByteArray payload = data.mid(offset + 2, length - 2);
+        if (marker == 0xe2 && payload.startsWith(QByteArrayLiteral("MPF\0"))) {
+            if (!result.mpf.isEmpty()) {
+                return {};
+            }
+            result.mpf = payload.mid(4);
+            result.tiffOffset = offset + 6;
+        } else if (marker == 0xe3 && payload.startsWith("_JPSJPS_")) {
+            if (result.jpsPresent) {
+                return {};
+            }
+            result.jpsPresent = true;
+            result.jps = payload.mid(8);
+        }
+        offset += length;
+    }
+    return {};
+}
+
+QString jpsStereoLayout(const QByteArray &data)
+{
+    if (data.size() < 6) {
+        return {};
+    }
+    const quint16 length = qFromBigEndian<quint16>(data.constData());
+    if (length < 4 || length > data.size() - 2) {
+        return {};
+    }
+    const quint32 descriptor = qFromBigEndian<quint32>(data.constData() + 2);
+    const quint8 type = descriptor & 0xff;
+    if (type == 0) {
+        return QStringLiteral("mono");
+    }
+    if (type != 1) {
+        return {};
+    }
+    QString layout;
+    switch ((descriptor >> 8) & 0xff) {
+    case 1:
+        layout = QStringLiteral("rowInterleaved");
+        break;
+    case 2:
+        layout = QStringLiteral("sideBySide");
+        break;
+    case 3:
+        layout = QStringLiteral("topBottom");
+        break;
+    case 4:
+        return (descriptor & 0x40000) ? QStringLiteral("anaglyphRedLeft") : QStringLiteral("anaglyphRedRight");
+    default:
+        return {};
+    }
+    return layout + ((descriptor & 0x40000) ? QStringLiteral("LeftFirst") : QStringLiteral("RightFirst"));
+}
 
 struct MpfData {
     qsizetype tiffOffset = -1;
@@ -77,8 +192,7 @@ qsizetype jpegHeaderInsertionPoint(const QByteArray &jpeg)
     }
 
     qsizetype offset = 2;
-    while (offset + 4 <= jpeg.size() && uchar(jpeg[offset]) == 0xff
-           && (uchar(jpeg[offset + 1]) == 0xe0 || uchar(jpeg[offset + 1]) == 0xe1)) {
+    while (offset + 4 <= jpeg.size() && uchar(jpeg[offset]) == 0xff && (uchar(jpeg[offset + 1]) == 0xe0 || uchar(jpeg[offset + 1]) == 0xe1)) {
         const quint16 length = qFromBigEndian<quint16>(reinterpret_cast<const uchar *>(jpeg.constData() + offset + 2));
         if (length < 2 || offset + 2 + length > jpeg.size()) {
             return -1;
@@ -199,9 +313,24 @@ QByteArray makeMpo(const QImage &image, int quality)
     if (left.isEmpty() || right.isEmpty()) {
         return {};
     }
-    right = addJpegSegment(right, 0xe2, makeMpfSegment({
-                                             {0x020002, quint32(right.size()), 0},
-                                         }));
+    QByteArray attributes("II", 2);
+    append16(attributes, 42);
+    append32(attributes, 8);
+    append16(attributes, 3);
+    append16(attributes, 0xb000);
+    append16(attributes, 7);
+    append32(attributes, 4);
+    attributes.append("0100", 4);
+    append16(attributes, 0xb101);
+    append16(attributes, 4);
+    append32(attributes, 1);
+    append32(attributes, 2);
+    append16(attributes, 0xb204);
+    append16(attributes, 4);
+    append32(attributes, 1);
+    append32(attributes, 1);
+    append32(attributes, 0);
+    right = addJpegSegment(right, 0xe2, QByteArrayLiteral("MPF\0") + attributes);
     if (right.isEmpty()) {
         return {};
     }
@@ -223,60 +352,118 @@ QByteArray makeMpo(const QImage &image, int quality)
     return left.left(insertionPoint) + mpf + left.mid(insertionPoint) + right;
 }
 
+class MpfReader
+{
+public:
+    explicit MpfReader(const QByteArray &data)
+        : m_data(data)
+        , m_little(data.startsWith("II"))
+    {
+    }
+
+    bool valid() const
+    {
+        return m_data.size() >= 8 && (m_data.startsWith("II") || m_data.startsWith("MM")) && read16(m_data, 2, m_little) == 42;
+    }
+
+    quint32 value(qsizetype pos) const
+    {
+        return read32(m_data, pos, m_little);
+    }
+
+    qsizetype field(quint32 ifd, quint16 tag, quint16 type, quint32 count) const
+    {
+        if (ifd < 8 || ifd > quint32(m_data.size() - 2)) {
+            return -1;
+        }
+        const quint16 fields = read16(m_data, ifd, m_little);
+        if (qint64(ifd) + 2 + qint64(fields) * 12 + 4 > m_data.size()) {
+            return -1;
+        }
+        for (qsizetype pos = ifd + 2; pos < ifd + 2 + fields * 12; pos += 12) {
+            if (read16(m_data, pos, m_little) == tag) {
+                return read16(m_data, pos + 2, m_little) == type && value(pos + 4) == count ? pos + 8 : -1;
+            }
+        }
+        return -1;
+    }
+
+    quint32 nextIfd(quint32 ifd) const
+    {
+        if (ifd < 8 || ifd > quint32(m_data.size() - 2)) {
+            return 0;
+        }
+        return value(qsizetype(ifd) + 2 + qsizetype(read16(m_data, ifd, m_little)) * 12);
+    }
+
+    quint32 viewpoint(quint32 ifd) const
+    {
+        const qsizetype pos = field(ifd, 0xb101, 4, 1);
+        return pos < 0 ? 0 : value(pos);
+    }
+
+private:
+    const QByteArray &m_data;
+    bool m_little;
+};
+
 std::optional<MpfData> parseMpf(const QByteArray &data)
 {
-    qsizetype offset = 2;
-    while (offset + 4 <= data.size() && uchar(data[offset]) == 0xff) {
-        const quint8 marker = uchar(data[offset + 1]);
-        if (marker == 0xda || marker == 0xd9) {
-            break;
-        }
-        if (marker == 0xe2) {
-            const quint16 length = qFromBigEndian<quint16>(reinterpret_cast<const uchar *>(data.constData() + offset + 2));
-            if (length >= 8 && offset + 2 + length <= data.size() && data.mid(offset + 4, 4) == QByteArrayLiteral("MPF\0")) {
-                const qsizetype tiffOffset = offset + 8;
-                const bool littleEndian = data.mid(tiffOffset, 2) == "II";
-                if (!littleEndian && data.mid(tiffOffset, 2) != "MM") {
-                    return std::nullopt;
-                }
-                const quint32 ifdOffset = read32(data, tiffOffset + 4, littleEndian);
-                const qsizetype ifd = tiffOffset + ifdOffset;
-                const quint16 count = read16(data, ifd, littleEndian);
-                qsizetype entry = ifd + 2;
-                quint32 numberOfImages = 0;
-                quint32 mpEntryOffset = 0;
-                for (quint16 i = 0; i < count; ++i, entry += 12) {
-                    const quint16 tag = read16(data, entry, littleEndian);
-                    const quint16 type = read16(data, entry + 2, littleEndian);
-                    const quint32 value = read32(data, entry + 8, littleEndian);
-                    if (tag == 0xb001 && type == 4) {
-                        numberOfImages = value;
-                    } else if (tag == 0xb002 && type == 7) {
-                        mpEntryOffset = value;
-                    }
-                }
-                if (numberOfImages != 2 || !mpEntryOffset) {
-                    return std::nullopt;
-                }
-                QList<MpfEntry> entries;
-                entry = tiffOffset + mpEntryOffset;
-                for (quint32 i = 0; i < numberOfImages; ++i, entry += 16) {
-                    entries.append({read32(data, entry, littleEndian), read32(data, entry + 4, littleEndian), read32(data, entry + 8, littleEndian)});
-                }
-                return MpfData{tiffOffset, entries};
-            }
-        }
-        if (marker == 0xd8 || marker == 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) {
-            offset += 2;
-        } else {
-            const quint16 length = qFromBigEndian<quint16>(reinterpret_cast<const uchar *>(data.constData() + offset + 2));
-            if (length < 2 || offset + 2 + length > data.size()) {
-                break;
-            }
-            offset += 2 + length;
+    const JpegHeader header = readJpegHeader(data);
+    const MpfReader index(header.mpf);
+    if (!header.valid || !index.valid()) {
+        return std::nullopt;
+    }
+    const quint32 ifd = index.value(4);
+    const qsizetype number = index.field(ifd, 0xb001, 4, 1);
+    const qsizetype entries = index.field(ifd, 0xb002, 7, 32);
+    if (number < 0 || index.value(number) != 2 || entries < 0) {
+        return std::nullopt;
+    }
+    const quint32 offset = index.value(entries);
+    if (qint64(offset) + 32 > header.mpf.size()) {
+        return std::nullopt;
+    }
+    QList<MpfEntry> records;
+    for (int i = 0; i < 2; ++i) {
+        const qsizetype pos = offset + i * 16;
+        records.append({index.value(pos), index.value(pos + 4), index.value(pos + 8)});
+    }
+    return MpfData{header.tiffOffset, records};
+}
+
+QString mpoStereoLayout(const QByteArray &data)
+{
+    const auto mpf = parseMpf(data);
+    if (!mpf) {
+        return {};
+    }
+    for (int i = 0; i < 2; ++i) {
+        const MpfEntry &entry = mpf->entries.at(i);
+        const qint64 start = i == 0 ? 0 : qint64(mpf->tiffOffset) + entry.offset;
+        if ((entry.attributes & 0x07ffffff) != 0x020002 || (i == 0 && entry.offset != 0) || entry.size < 4 || start > data.size() - qint64(entry.size)
+            || data.mid(start + entry.size - 2, 2) != QByteArrayLiteral("\xff\xd9")) {
+            return {};
         }
     }
-    return std::nullopt;
+    const MpfEntry &secondEntry = mpf->entries.at(1);
+    const qsizetype secondStart = mpf->tiffOffset + secondEntry.offset;
+    if (secondStart < mpf->entries.at(0).size) {
+        return {};
+    }
+    const JpegHeader firstHeader = readJpegHeader(data);
+    const MpfReader first(firstHeader.mpf);
+    const JpegHeader secondHeader = readJpegHeader(data.mid(secondStart, secondEntry.size));
+    const MpfReader second(secondHeader.mpf);
+    if (!secondHeader.valid || !second.valid()) {
+        return {};
+    }
+    const quint32 firstView = first.viewpoint(first.nextIfd(first.value(4)));
+    const quint32 secondView = second.viewpoint(second.value(4));
+    if (firstView == 0 || secondView == 0 || firstView == 0xffffffff || secondView == 0xffffffff || firstView == secondView) {
+        return {};
+    }
+    return firstView < secondView ? QStringLiteral("multiViewLeftFirst") : QStringLiteral("multiViewRightFirst");
 }
 
 QList<QByteArray> splitMpo(const QByteArray &data)
@@ -324,7 +511,13 @@ public:
         if (image->isNull()) {
             return false;
         }
-        image->setText(QString::fromLatin1(stereoLayoutKey), m_isMpo ? QString::fromLatin1(mpoLayout) : QString::fromLatin1(jpsLayout));
+        const QString legacy = legacyLayout(m_stereo3DLayout);
+        if (!legacy.isEmpty()) {
+            image->setText(QString::fromLatin1(stereoLayoutKey), legacy);
+        }
+        if (!m_stereo3DLayout.isEmpty()) {
+            image->setText(QString::fromLatin1(stereo3DLayoutKey), m_stereo3DLayout);
+        }
         return true;
     }
 
@@ -384,11 +577,14 @@ public:
 
     bool supportsOption(ImageOption option) const override
     {
-        return option == Size || option == ImageFormat || option == Quality;
+        return option == Size || option == ImageFormat || option == Quality || option == Description;
     }
 
     QVariant option(ImageOption option) const override
     {
+        if (option == Description && scan()) {
+            return m_stereo3DLayout.isEmpty() ? QString() : QString::fromLatin1(stereo3DLayoutKey) + QStringLiteral(": ") + m_stereo3DLayout;
+        }
         if (option == Size && scan() && !m_images.isEmpty()) {
             return QImage::fromData(m_images.first(), "jpeg").size();
         }
@@ -420,17 +616,21 @@ private:
         }
         const QByteArray data = device()->readAll();
         if (isFormat(format(), mpoFormat)) {
-            m_isMpo = true;
             m_images = splitMpo(data);
+            m_stereo3DLayout = mpoStereoLayout(data);
         } else if (data.startsWith("\xff\xd8")) {
             m_images.append(data);
+            const JpegHeader header = readJpegHeader(data);
+            if (header.valid) {
+                m_stereo3DLayout = header.jpsPresent ? jpsStereoLayout(header.jps) : QStringLiteral("sideBySideRightFirst");
+            }
         }
         return !m_images.isEmpty();
     }
 
     mutable bool m_scanned = false;
     mutable QList<QByteArray> m_images;
-    mutable bool m_isMpo = false;
+    mutable QString m_stereo3DLayout;
     int m_currentImage = 0;
     int m_quality = -1;
 };
