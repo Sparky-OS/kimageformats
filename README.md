@@ -1,3 +1,29 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/sparky-stereo-os/sparkyos-swirl-light-128.png">
+  <img src=".github/sparky-stereo-os/sparkyos-swirl-dark-128.png" alt="SparkyOS" width="128" height="128">
+</picture>
+
+## Sparky Stereo OS
+
+This is the stereo version of KImageFormats by Sparky Stereo OS, forked from [KDE/kimageformats](https://github.com/KDE/kimageformats).
+It adds reading and writing of stereo photographs as JPS and as MPO (CIPA DC-007 Multi-Picture Format).
+
+Where it comes from:
+
+- [KImageFormats](https://invent.kde.org/frameworks/kimageformats) is part of KDE Frameworks, made by the KDE community.
+- [Debian](https://www.debian.org/) is the base of the system.
+- [SparkyLinux](https://sparkylinux.org/), by Paweł "pavroo" Pijanowski, builds on Debian.
+- [Sparky Stereo OS](https://github.com/Sparky-OS/sparky-stereo-os) is the stereo 3D edition of SparkyLinux: SparkyOS, powered by Debian.
+
+The `stereo3d` branch holds the version the distribution builds.
+KDE develops KImageFormats on invent.kde.org.
+The canonical version of this work is there too, on the [`stereo3d`](https://invent.kde.org/danielcamposramos/kimageformats/-/tree/stereo3d) branch.
+The licences are unchanged; see [LICENSES](LICENSES).
+
+Sparky Stereo OS, Daniel Ramos's edition of SparkyLinux (by Paweł "pavroo" Pijanowski).
+
+---
+
 # KImageFormats
 
 Plugins to allow [`QImage`](https://doc.qt.io/qt-6/qimage.html) to support
