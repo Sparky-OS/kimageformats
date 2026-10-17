@@ -432,6 +432,23 @@ std::optional<MpfData> parseMpf(const QByteArray &data)
     return MpfData{header.tiffOffset, records};
 }
 
+// Whether the Multi-Picture Format index describes a stereo pair: two images, both of MP Type "Multi-frame Image:
+// Disparity Image" (CIPA DC-007 5.2.3.3.1, 020002.H). Other two-image files, such as a picture and its HDR gain map,
+// are ordinary JPEG pictures.
+bool isStereoMpf(const QByteArray &data)
+{
+    const auto mpf = parseMpf(data);
+    if (!mpf) {
+        return false;
+    }
+    for (const MpfEntry &entry : mpf->entries) {
+        if ((entry.attributes & 0x07ffffff) != 0x020002) {
+            return false;
+        }
+    }
+    return true;
+}
+
 QString mpoStereoLayout(const QByteArray &data)
 {
     const auto mpf = parseMpf(data);
@@ -649,7 +666,7 @@ public:
         if (format.isEmpty() && device && device->isReadable()) {
             const QByteArray data = device->peek(1024 * 1024);
             const JpegHeader header = readJpegHeader(data);
-            if (header.valid && (header.jpsPresent || (!header.mpf.isEmpty() && parseMpf(data)))) {
+            if (header.valid && (header.jpsPresent || isStereoMpf(data))) {
                 return CanRead;
             }
         }
@@ -663,7 +680,7 @@ public:
         if (isFormat(format, jpsFormat) || isFormat(format, mpoFormat)) {
             handler->setFormat(format);
         } else {
-            const bool isMpo = bool(parseMpf(device->peek(1024 * 1024)));
+            const bool isMpo = isStereoMpf(device->peek(1024 * 1024));
             handler->setFormat(isMpo ? QByteArray(mpoFormat.data(), mpoFormat.size()) : QByteArray(jpsFormat.data(), jpsFormat.size()));
         }
         return handler;

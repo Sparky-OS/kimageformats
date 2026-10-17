@@ -79,6 +79,8 @@ for name, data in {
     'equal': mpo((1, 1), True),
     'composite': mpo((0, 1), True),
     'multangle': mpo((1, 2), True, kind=0x020003),
+    # MP Type undefined, as a picture and its HDR gain map: no stereo pair
+    'undefined': mpo((1, 2), True, kind=0),
     'badoffset': mpo((1, 2), True, bad_offset=True),
     'badcount': mpo((1, 2), True, bad_count=True),
     'truncated': mpo((1, 2), True)[:-5],

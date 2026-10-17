@@ -100,6 +100,9 @@ private Q_SLOTS:
         QTest::newRow("mpo-right") << QStringLiteral("test_mpo_1_1.mpo") << QStringLiteral("multiViewRightFirst") << 2;
         QTest::newRow("ordinary") << QStringLiteral("test_jps_unmarked.jpg") << QString() << 1;
         QTest::newRow("unsupported-mpf") << QStringLiteral("test_mpo_badcount.mpo") << QString() << 1;
+        // CIPA DC-007: only Disparity Images make a stereo pair; Multi-Angle and undefined images are ordinary pictures
+        QTest::newRow("multi-angle-mpf") << QStringLiteral("test_mpo_multangle.mpo") << QString() << 1;
+        QTest::newRow("undefined-mpf") << QStringLiteral("test_mpo_undefined.mpo") << QString() << 1;
     }
 
     void contentDetection()
