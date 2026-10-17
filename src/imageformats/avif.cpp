@@ -13,8 +13,13 @@
 #include <QLoggingCategory>
 
 #include "avif_p.h"
+#include "depthmark_p.h"
 #include "microexif_p.h"
 #include "util_p.h"
+
+#ifdef KIMG_AVIF_DEPTH
+#include <libheif/heif.h>
+#endif
 
 #include <cfloat>
 
@@ -599,8 +604,38 @@ static void setMetadata(avifImage *avif, const QImage &image)
     }
 }
 
+bool QAVIFHandler::hasSecondImage() const
+{
+#ifdef KIMG_AVIF_DEPTH
+    if (!m_secondRead && ensureParsed() && m_decoder->imageCount < 2) {
+        m_secondRead = true;
+        heif_context *ctx = heif_context_alloc();
+        heif_image_handle *primary = nullptr;
+        if (!heif_context_read_from_memory_without_copy(ctx, m_rawData.constData(), m_rawData.size(), nullptr).code
+            && !heif_context_get_primary_image_handle(ctx, &primary).code) {
+            // libavif applies the primary image's transformations to its pixels: the second image gets the same.
+            const quint16 primaryOrientation = heifOrientation(ctx, heif_image_handle_get_item_id(primary));
+            m_second = readHeifSecondImage(ctx, primary, m_rawData, primaryOrientation, m_current_image.colorSpace());
+            m_second.image = applyOrientation(m_second.image, m_second.orientation);
+            m_second.orientation = 0;
+            heif_image_handle_release(primary);
+        }
+        heif_context_free(ctx);
+    }
+    return !m_second.image.isNull();
+#else
+    return false;
+#endif
+}
+
 bool QAVIFHandler::read(QImage *image)
 {
+#ifdef KIMG_AVIF_DEPTH
+    if (m_secondNumber == 1 && hasSecondImage()) {
+        *image = m_second.image;
+        return true;
+    }
+#endif
     if (!ensureOpened()) {
         return false;
     }
@@ -610,7 +645,15 @@ bool QAVIFHandler::read(QImage *image)
     }
 
     *image = m_current_image;
-    if (imageCount() >= 2) {
+#ifdef KIMG_AVIF_DEPTH
+    if (hasSecondImage()) {
+        image->setText(DepthMark::layoutKey, m_second.layout);
+        if (!m_second.depthMark.isEmpty()) {
+            image->setText(DepthMark::depthKey, m_second.depthMark);
+        }
+    }
+#endif
+    if (m_decoder->imageCount >= 2) {
         m_must_jump_to_next_image = true;
         if (m_decoder->imageIndex >= m_decoder->imageCount - 1) {
             // all frames in animation have been read
@@ -1087,7 +1130,19 @@ QVariant QAVIFHandler::option(ImageOption option) const
 
     switch (option) {
     case Size:
+#ifdef KIMG_AVIF_DEPTH
+        if (m_secondNumber == 1 && hasSecondImage()) {
+            return m_second.image.size();
+        }
+#endif
         return m_estimated_dimensions;
+    case Description:
+#ifdef KIMG_AVIF_DEPTH
+        if (hasSecondImage()) {
+            return DepthMark::description(m_second.layout, m_second.depthMark);
+        }
+#endif
+        return QString();
     case Animation:
         if (imageCount() >= 2) {
             return true;
@@ -1118,7 +1173,7 @@ void QAVIFHandler::setOption(ImageOption option, const QVariant &value)
 
 bool QAVIFHandler::supportsOption(ImageOption option) const
 {
-    return option == Quality || option == Size || option == Animation;
+    return option == Quality || option == Size || option == Animation || option == Description;
 }
 
 int QAVIFHandler::imageCount() const
@@ -1127,6 +1182,9 @@ int QAVIFHandler::imageCount() const
         return 0;
     }
 
+    if (m_decoder->imageCount == 1 && hasSecondImage()) {
+        return 2;
+    }
     if (m_decoder->imageCount >= 1) {
         return m_decoder->imageCount;
     }
@@ -1135,6 +1193,9 @@ int QAVIFHandler::imageCount() const
 
 int QAVIFHandler::currentImageNumber() const
 {
+    if (m_secondNumber == 1) {
+        return 1;
+    }
     if (m_parseState == ParseAvifNotParsed) {
         return -1;
     }
@@ -1162,7 +1223,11 @@ bool QAVIFHandler::jumpToNextImage()
 
     if (m_decoder->imageIndex >= 0) {
         if (m_decoder->imageCount < 2) {
-            // single image, there is no next image
+            // single image: the next is its depth map or other view, when it has one
+            if (m_secondNumber == 0 && hasSecondImage()) {
+                m_secondNumber = 1;
+                return true;
+            }
             return false;
         }
 
@@ -1209,10 +1274,15 @@ bool QAVIFHandler::jumpToImage(int imageNumber)
 
     if (m_decoder->imageCount < 2) { // not an animation
         if (imageNumber == 0) {
+            m_secondNumber = 0;
             if (ensureOpened()) {
                 m_parseState = ParseAvifSuccess;
                 return true;
             }
+        }
+        if (imageNumber == 1 && hasSecondImage()) {
+            m_secondNumber = 1;
+            return true;
         }
         return false;
     }

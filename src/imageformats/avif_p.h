@@ -18,6 +18,10 @@
 #include <QVariant>
 #include <avif/avif.h>
 
+#ifdef KIMG_AVIF_DEPTH
+#include "heifdepth_p.h"
+#endif
+
 class QAVIFHandler : public QImageIOHandler
 {
 public:
@@ -50,6 +54,9 @@ private:
     bool initDecoder(bool ignore_exif);
     bool ensureDecoder();
     bool decode_one_frame();
+    // the depth map or the other view of a stereo pair of a still image, read with libheif: libavif reads no other
+    // auxiliary image than alpha and gain maps
+    bool hasSecondImage() const;
 
     enum ParseAvifState {
         ParseAvifError = -1,
@@ -73,6 +80,12 @@ private:
     QImage m_current_image;
 
     bool m_must_jump_to_next_image;
+
+#ifdef KIMG_AVIF_DEPTH
+    mutable HeifSecondImage m_second;
+    mutable bool m_secondRead = false;
+#endif
+    int m_secondNumber = 0;
 };
 
 class QAVIFPlugin : public QImageIOPlugin

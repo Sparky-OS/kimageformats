@@ -35,8 +35,13 @@ kimageformats_add_plugin(kimg_ani SOURCES ani.cpp)
 ##################################
 
 if (TARGET avif)
-    kimageformats_add_plugin(kimg_avif SOURCES avif.cpp microexif.cpp)
+    kimageformats_add_plugin(kimg_avif SOURCES avif.cpp depthmark.cpp microexif.cpp)
     target_link_libraries(kimg_avif PRIVATE "avif")
+    if(LibHeif_FOUND)
+        target_sources(kimg_avif PRIVATE heifdepth.cpp)
+        target_compile_definitions(kimg_avif PRIVATE KIMG_AVIF_DEPTH)
+        target_link_libraries(kimg_avif PRIVATE PkgConfig::LibHeif)
+    endif()
 endif()
 
 ##################################
