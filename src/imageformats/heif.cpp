@@ -7,6 +7,7 @@
     SPDX-License-Identifier: LGPL-2.0-or-later
 */
 
+#include "depthmark_p.h"
 #include "heif_p.h"
 #include "microexif_p.h"
 #include "util_p.h"
@@ -191,8 +192,35 @@ bool HEIFHandler::read(QImage *outImage)
         return false;
     }
 
-    *outImage = m_current_image;
+    *outImage = m_imageNumber == 1 ? m_second.image : m_current_image;
     return true;
+}
+
+int HEIFHandler::imageCount() const
+{
+    if (!ensureParsed()) {
+        return 0;
+    }
+    return m_second.image.isNull() ? 1 : 2;
+}
+
+int HEIFHandler::currentImageNumber() const
+{
+    return m_imageNumber;
+}
+
+bool HEIFHandler::jumpToImage(int imageNumber)
+{
+    if (imageNumber < 0 || imageNumber >= imageCount()) {
+        return false;
+    }
+    m_imageNumber = imageNumber;
+    return true;
+}
+
+bool HEIFHandler::jumpToNextImage()
+{
+    return jumpToImage(m_imageNumber + 1);
 }
 
 bool HEIFHandler::write(const QImage &image)
@@ -762,9 +790,11 @@ QVariant HEIFHandler::option(ImageOption option) const
 
     switch (option) {
     case Size:
-        return m_current_image.size();
+        return m_imageNumber == 1 ? m_second.image.size() : m_current_image.size();
     case ImageTransformation:
-        return int(MicroExif::orientationToTransformation(m_orientation));
+        return int(MicroExif::orientationToTransformation(m_imageNumber == 1 ? m_second.orientation : m_orientation));
+    case Description:
+        return DepthMark::description(m_second.layout, m_second.depthMark);
     default:
         return QVariant();
     }
@@ -792,7 +822,7 @@ void HEIFHandler::setOption(ImageOption option, const QVariant &value)
 
 bool HEIFHandler::supportsOption(ImageOption option) const
 {
-    auto ok = option == Quality || option == Size;
+    auto ok = option == Quality || option == Size || option == Description;
 #ifndef HEIF_DISABLE_QT_TRANSFORMATION
     ok = ok || option == ImageTransformation;
 #endif
@@ -1355,6 +1385,15 @@ bool HEIFHandler::ensureDecoder()
                 }
             }
         }
+    }
+
+    // the depth map or the other view of a stereo pair, decoded with the primary image's transformations reported
+    m_second = readHeifSecondImage(ctx, handle, heifMetaBox(dev, dev->isSequential() ? buffer : QByteArray()), m_orientation, m_current_image.colorSpace());
+    if (!m_second.layout.isEmpty()) {
+        m_current_image.setText(DepthMark::layoutKey, m_second.layout);
+    }
+    if (!m_second.depthMark.isEmpty()) {
+        m_current_image.setText(DepthMark::depthKey, m_second.depthMark);
     }
 
     heif_image_release(img);

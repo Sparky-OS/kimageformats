@@ -15,6 +15,8 @@
 #include <QImageIOPlugin>
 #include <QMutex>
 
+#include "heifdepth_p.h"
+
 class HEIFHandler : public QImageIOHandler
 {
 public:
@@ -27,6 +29,11 @@ public:
     QVariant option(ImageOption option) const override;
     void setOption(ImageOption option, const QVariant &value) override;
     bool supportsOption(ImageOption option) const override;
+
+    int imageCount() const override;
+    int currentImageNumber() const override;
+    bool jumpToImage(int imageNumber) override;
+    bool jumpToNextImage() override;
 
     static bool isHeifDecoderAvailable();
     static bool isHeifEncoderAvailable();
@@ -55,6 +62,9 @@ private:
     int m_quality;
     QImage m_current_image;
     quint16 m_orientation;
+    // the depth map or the other view of a stereo pair, the reader's second image
+    HeifSecondImage m_second;
+    int m_imageNumber = 0;
 
     bool write_helper(const QImage &image);
 

@@ -82,7 +82,7 @@ kimageformats_add_plugin(kimg_hdr SOURCES hdr.cpp)
 ##################################
 
 if (LibHeif_FOUND)
-    kimageformats_add_plugin(kimg_heif SOURCES heif.cpp microexif.cpp)
+    kimageformats_add_plugin(kimg_heif SOURCES heif.cpp heifdepth.cpp depthmark.cpp microexif.cpp)
     target_link_libraries(kimg_heif PRIVATE PkgConfig::LibHeif)
 endif()
 
