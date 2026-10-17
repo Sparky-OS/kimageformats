@@ -609,6 +609,10 @@ bool QAVIFHandler::hasSecondImage() const
 #ifdef KIMG_AVIF_DEPTH
     if (!m_secondRead && ensureParsed() && m_decoder->imageCount < 2) {
         m_secondRead = true;
+        // libheif is opened only for files that can have a second image: most have none
+        if (!DepthMark::mayHaveSecondImage(m_rawData)) {
+            return false;
+        }
         heif_context *ctx = heif_context_alloc();
         heif_image_handle *primary = nullptr;
         if (!heif_context_read_from_memory_without_copy(ctx, m_rawData.constData(), m_rawData.size(), nullptr).code

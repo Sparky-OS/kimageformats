@@ -399,6 +399,28 @@ QByteArray auxSubtype(const QByteArray &file, quint32 itemId)
     return {};
 }
 
+bool mayHaveSecondImage(const QByteArray &file)
+{
+    for (const Box &meta : boxes(file, 0, file.size())) {
+        if (meta.type != "meta") {
+            continue;
+        }
+        for (const Box &box : boxes(file, meta.payload + 4, meta.end)) {
+            const qsizetype children = box.type == "iref" ? box.payload + 4 : box.type == "grpl" ? box.payload : -1;
+            if (children < 0) {
+                continue;
+            }
+            for (const Box &entry : boxes(file, children, box.end)) {
+                if (entry.type == "auxl" || entry.type == "ster") {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
 void Xmp::add(const QByteArray &packet)
 {
     enum class Context {

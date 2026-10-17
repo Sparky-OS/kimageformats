@@ -46,6 +46,11 @@ QString fromAuxSubtype(const QByteArray &subtype, int viewWidth);
 // whole file or its beginning). Empty when there is none.
 QByteArray auxSubtype(const QByteArray &file, quint32 itemId);
 
+// Whether an ISO/IEC 23008-12 file (the whole file or its beginning) can have a second image as the readers report
+// it: an auxiliary image reference ('auxl') or a stereo pair entity group ('ster'). Read from the MetaBox alone, so that
+// files without either cost nothing more.
+bool mayHaveSecondImage(const QByteArray &file);
+
 // XMP properties, by namespace URI and name, from the main packet and its extension (XMP Specification Part 3,
 // 1.1.3.1 for JPEG): attributes and simple elements both.
 class Xmp
