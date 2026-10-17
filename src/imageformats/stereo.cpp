@@ -5,20 +5,26 @@
     SPDX-License-Identifier: LGPL-2.1-or-later OR LGPL-3.0-or-later OR LicenseRef-KDE-Accepted-LGPL
 */
 
+#include "depthmark_p.h"
+
 #include <QBuffer>
 #include <QImage>
 #include <QImageIOPlugin>
+#include <QImageReader>
 #include <QImageWriter>
 #include <QList>
 #include <QVariant>
 #include <QtEndian>
 
+#include <functional>
 #include <optional>
 
 namespace
 {
 constexpr QByteArrayView jpsFormat = "jps";
 constexpr QByteArrayView mpoFormat = "mpo";
+// a JPEG picture with its depth map (Dynamic Depth, GDepth, Apple's depth data)
+constexpr QByteArrayView depthFormat = "jpeg";
 constexpr QByteArrayView stereoLayoutKey = "StereoLayout";
 constexpr QByteArrayView stereo3DLayoutKey = "Stereo3DLayout";
 constexpr QByteArrayView jpsLayout = "side-by-side; right eye first";
@@ -56,16 +62,22 @@ struct JpegHeader {
     QByteArray jps;
     QByteArray mpf;
     qsizetype tiffOffset = 0;
+    // XMP Specification Part 3, 1.1.3.1: the main packet and the extension's chunks
+    QByteArray xmp;
+    QList<QByteArray> extendedXmp;
 };
 
-JpegHeader readJpegHeader(const QByteArray &data)
+constexpr QByteArrayView xmpSignature("http://ns.adobe.com/xap/1.0/\0", 29);
+constexpr QByteArrayView extendedXmpSignature("http://ns.adobe.com/xmp/extension/\0", 35);
+
+JpegHeader readJpegHeader(const QByteArray &data, qsizetype limit = 1024 * 1024)
 {
     JpegHeader result;
     if (!data.startsWith(QByteArrayLiteral("\xff\xd8"))) {
         return result;
     }
     qsizetype offset = 2;
-    while (offset < data.size() && offset < 1024 * 1024) {
+    while (offset < data.size() && offset < limit) {
         if (quint8(data.at(offset++)) != 0xff) {
             return {};
         }
@@ -100,6 +112,10 @@ JpegHeader readJpegHeader(const QByteArray &data)
             }
             result.mpf = payload.mid(4);
             result.tiffOffset = offset + 6;
+        } else if (marker == 0xe1 && payload.startsWith(xmpSignature)) {
+            result.xmp = payload.mid(xmpSignature.size());
+        } else if (marker == 0xe1 && payload.startsWith(extendedXmpSignature)) {
+            result.extendedXmp.append(payload.mid(extendedXmpSignature.size()));
         } else if (marker == 0xe3 && payload.startsWith("_JPSJPS_")) {
             if (result.jpsPresent) {
                 return {};
@@ -500,6 +516,285 @@ QList<QByteArray> splitMpo(const QByteArray &data)
     return result;
 }
 
+// Where the primary image of a JPEG file ends: after its EOI marker, the entropy-coded data of each scan skipped.
+qsizetype jpegEnd(const QByteArray &data)
+{
+    qsizetype offset = 2;
+    while (offset + 2 <= data.size()) {
+        if (quint8(data.at(offset)) != 0xff) {
+            return -1;
+        }
+        const quint8 marker = quint8(data.at(offset + 1));
+        if (marker == 0xff) {
+            ++offset;
+            continue;
+        }
+        if (marker == 0xd9) {
+            return offset + 2;
+        }
+        if (marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+            offset += 2;
+            continue;
+        }
+        if (offset + 4 > data.size()) {
+            return -1;
+        }
+        offset += 2 + qFromBigEndian<quint16>(data.constData() + offset + 2);
+        if (marker == 0xda) {
+            while (offset + 1 < data.size()) {
+                if (quint8(data.at(offset)) != 0xff) {
+                    ++offset;
+                    continue;
+                }
+                const quint8 next = quint8(data.at(offset + 1));
+                if (next == 0 || (next >= 0xd0 && next <= 0xd7)) {
+                    offset += 2;
+                } else if (next == 0xff) {
+                    ++offset;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+// Every image of a CIPA DC-007 Multi-Picture Format index, the first being the file's primary image.
+QList<MpfEntry> mpfEntries(const JpegHeader &header)
+{
+    const MpfReader index(header.mpf);
+    if (!header.valid || !index.valid()) {
+        return {};
+    }
+    const quint32 ifd = index.value(4);
+    const qsizetype number = index.field(ifd, 0xb001, 4, 1);
+    const quint32 count = number < 0 ? 0 : index.value(number);
+    if (count < 2 || count > 64) {
+        return {};
+    }
+    const qsizetype entries = index.field(ifd, 0xb002, 7, count * 16);
+    if (entries < 0) {
+        return {};
+    }
+    const quint32 offset = index.value(entries);
+    if (qint64(offset) + count * 16 > header.mpf.size()) {
+        return {};
+    }
+    QList<MpfEntry> records;
+    for (quint32 i = 0; i < count; ++i) {
+        const qsizetype pos = offset + i * 16;
+        records.append({index.value(pos), index.value(pos + 4), index.value(pos + 8)});
+    }
+    return records;
+}
+
+DepthMark::Xmp jpegXmp(const JpegHeader &header)
+{
+    DepthMark::Xmp xmp;
+    xmp.add(header.xmp);
+    const QString guid = xmp.value(u"http://ns.adobe.com/xmp/note/", u"HasExtendedXMP");
+    if (!guid.isEmpty()) {
+        xmp.add(DepthMark::extendedXmp(header.extendedXmp, guid.toLatin1()));
+    }
+    return xmp;
+}
+
+QByteArray formatOfMime(const QString &mime)
+{
+    if (mime == QLatin1String("image/jpeg")) {
+        return QByteArrayLiteral("jpeg");
+    }
+    if (mime == QLatin1String("image/png")) {
+        return QByteArrayLiteral("png");
+    }
+    if (mime == QLatin1String("image/tiff")) {
+        return QByteArrayLiteral("tiff");
+    }
+    if (mime == QLatin1String("image/heif") || mime == QLatin1String("image/heic")) {
+        return QByteArrayLiteral("heif");
+    }
+    return {};
+}
+
+bool startsLike(const QByteArray &data, const QByteArray &format)
+{
+    if (format == "jpeg") {
+        return data.startsWith("\xff\xd8");
+    }
+    if (format == "png") {
+        return data.startsWith("\x89PNG");
+    }
+    if (format == "tiff") {
+        return data.startsWith(QByteArrayView("II*\0", 4)) || data.startsWith(QByteArrayView("MM\0*", 4));
+    }
+    if (format == "heif") {
+        return data.mid(4, 4) == "ftyp";
+    }
+    return false;
+}
+
+// A picture with its depth map in one JPEG file (Sparky Stereo OS's depth marks, depthSeparate): the encoded depth map,
+// the picture before the camera's effects when the file has it, and the Stereo3DDepth mark.
+struct JpegDepth {
+    QString mark;
+    QByteArray depth;
+    QByteArray depthFormat;
+    QByteArray original;
+    QByteArray originalFormat;
+};
+
+// Reads count bytes at a position of the file data comes from: data itself when it holds them.
+using ReadAt = std::function<QByteArray(qint64, qint64)>;
+
+std::optional<JpegDepth> dynamicDepth(const QByteArray &data, const DepthMark::Xmp &xmp, bool whole)
+{
+    // Dynamic Depth 1.0: the Device's Cameras, the DepthMap of the Depth Photo profile's camera or of the first camera
+    // with one ("Depth images for the first camera must have no holes"), its Container item by DepthURI.
+    if (xmp.items.isEmpty()) {
+        return std::nullopt;
+    }
+    int camera = -1;
+    for (const int index : xmp.depthPhotoCameras) {
+        if (index >= 0 && index < xmp.depthMaps.size() && xmp.depthMaps.at(index).valid) {
+            camera = index;
+            break;
+        }
+    }
+    for (int i = 0; camera < 0 && i < xmp.depthMaps.size(); ++i) {
+        if (xmp.depthMaps.at(i).valid) {
+            camera = i;
+        }
+    }
+    if (camera < 0) {
+        return std::nullopt;
+    }
+    const auto &map = xmp.depthMaps.at(camera);
+    // ItemSemantic Segmentation: a segmentation mask, not depth
+    if (!map.semantic.isEmpty() && map.semantic != QLatin1String("Depth")) {
+        return std::nullopt;
+    }
+    JpegDepth result;
+    result.mark = DepthMark::fromRange(map.format, map.near, map.far);
+    if (result.mark.isEmpty() || !whole) {
+        return result.mark.isEmpty() ? std::nullopt : std::optional(result);
+    }
+
+    // "The location of media item resources in the container is determined by summing the Length's of the preceding
+    // secondary item resources to the length of the primary image encoding plus Padding if specified."
+    const qsizetype primaryEnd = jpegEnd(data);
+    const auto locate = [&xmp](qint64 first) {
+        QList<QPair<qint64, qint64>> places(xmp.items.size(), {0, 0});
+        qint64 pos = first;
+        for (int i = 1; i < xmp.items.size(); ++i) {
+            const qint64 length = xmp.items.at(i).length;
+            places[i] = length == 0 ? places.at(i - 1) : QPair<qint64, qint64>(pos, length);
+            pos += length;
+        }
+        return places;
+    };
+    const auto item = [&](const QString &uri, QByteArray *bytes, QByteArray *format) {
+        qint64 total = 0;
+        for (int i = 1; i < xmp.items.size(); ++i) {
+            total += xmp.items.at(i).length;
+        }
+        for (int i = 1; i < xmp.items.size(); ++i) {
+            if (xmp.items.at(i).dataUri != uri) {
+                continue;
+            }
+            *format = formatOfMime(xmp.items.at(i).mime);
+            // the items packed after the primary image; else, for a file with more after its primary image than the
+            // directory lists, the items packed at the end
+            for (const qint64 first : {primaryEnd < 0 ? qint64(-1) : primaryEnd + xmp.items.first().padding, data.size() - total}) {
+                const auto place = locate(first).at(i);
+                if (first >= 0 && place.first + place.second <= data.size() && startsLike(data.mid(place.first, 16), *format)) {
+                    *bytes = data.mid(place.first, place.second);
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    if (!item(map.depthUri, &result.depth, &result.depthFormat)) {
+        return std::nullopt;
+    }
+    if (camera < xmp.images.size() && xmp.images.at(camera).first == QLatin1String("Original")) {
+        item(xmp.images.at(camera).second, &result.original, &result.originalFormat);
+    }
+    return result;
+}
+
+std::optional<JpegDepth> googleDepth(const DepthMark::Xmp &xmp, bool whole)
+{
+    // GDepth (Google's depthmap metadata): Format, Near, Far, Mime and Data, the depth map's file in base64; GImage,
+    // the image before Google Camera's Lens Blur.
+    static const QString gdepth = QStringLiteral("http://ns.google.com/photos/1.0/depthmap/");
+    static const QString gimage = QStringLiteral("http://ns.google.com/photos/1.0/image/");
+    JpegDepth result;
+    result.mark = DepthMark::fromRange(xmp.value(gdepth, u"Format"), xmp.value(gdepth, u"Near").toDouble(), xmp.value(gdepth, u"Far").toDouble());
+    if (result.mark.isEmpty() || !whole) {
+        return result.mark.isEmpty() ? std::nullopt : std::optional(result);
+    }
+    result.depth = QByteArray::fromBase64(xmp.value(gdepth, u"Data").toLatin1());
+    result.depthFormat = formatOfMime(xmp.value(gdepth, u"Mime"));
+    if (!startsLike(result.depth, result.depthFormat)) {
+        return std::nullopt;
+    }
+    result.original = QByteArray::fromBase64(xmp.value(gimage, u"Data").toLatin1());
+    result.originalFormat = formatOfMime(xmp.value(gimage, u"Mime"));
+    if (!startsLike(result.original, result.originalFormat)) {
+        result.original.clear();
+    }
+    return result;
+}
+
+std::optional<JpegDepth> appleDepth(const JpegHeader &header, const ReadAt &readAt, bool whole)
+{
+    // Apple's portrait JPEG: Multi-Picture Format images after the primary one, each with its depth data description
+    // (AuxiliaryImageType, NativeFormat) in its own XMP; the disparity or depth map is the one that describes depth.
+    const QList<MpfEntry> entries = mpfEntries(header);
+    for (int i = 1; i < entries.size(); ++i) {
+        const qint64 start = header.tiffOffset + qint64(entries.at(i).offset);
+        const QByteArray image = readAt(start, whole ? entries.at(i).size : qMin<qint64>(entries.at(i).size, 64 * 1024));
+        const JpegHeader imageHeader = readJpegHeader(image);
+        if (!imageHeader.valid) {
+            continue;
+        }
+        const DepthMark::Xmp xmp = jpegXmp(imageHeader);
+        if (!DepthMark::isAppleDepth(xmp)) {
+            continue;
+        }
+        JpegDepth result;
+        result.mark = DepthMark::fromAppleDepthData(xmp, 8);
+        if (result.mark.isEmpty()) {
+            continue;
+        }
+        if (whole) {
+            result.depth = image;
+            result.depthFormat = QByteArrayLiteral("jpeg");
+        }
+        return result;
+    }
+    return std::nullopt;
+}
+
+// The depth map of a JPEG file, data being the whole file (whole) or its beginning.
+std::optional<JpegDepth> jpegDepth(const QByteArray &data, const ReadAt &readAt, bool whole)
+{
+    const JpegHeader header = readJpegHeader(data, whole ? data.size() : 1024 * 1024);
+    if (!header.valid) {
+        return std::nullopt;
+    }
+    const DepthMark::Xmp xmp = jpegXmp(header);
+    if (auto depth = dynamicDepth(data, xmp, whole)) {
+        return depth;
+    }
+    if (auto depth = googleDepth(xmp, whole)) {
+        return depth;
+    }
+    return appleDepth(header, readAt, whole);
+}
+
 } // namespace
 
 class StereoHandler final : public QImageIOHandler
@@ -510,8 +805,9 @@ public:
         if (!device()) {
             return false;
         }
-        if (isFormat(format(), jpsFormat) || isFormat(format(), mpoFormat)) {
-            return device()->peek(2) == QByteArrayLiteral("\xff\xd8");
+        if (isFormat(format(), jpsFormat) || isFormat(format(), mpoFormat) || isFormat(format(), depthFormat)) {
+            // once scanned, the device has been read to its end
+            return m_scanned ? !m_images.isEmpty() : device()->peek(2) == QByteArrayLiteral("\xff\xd8");
         }
         return false;
     }
@@ -524,9 +820,12 @@ public:
         if (m_images.isEmpty() || m_currentImage >= m_images.size()) {
             return false;
         }
-        *image = QImage::fromData(m_images.at(m_currentImage), "jpeg");
+        *image = QImage::fromData(m_images.at(m_currentImage), m_formats.value(m_currentImage, QByteArrayLiteral("jpeg")).constData());
         if (image->isNull()) {
             return false;
+        }
+        if (!m_depthMark.isEmpty() && m_currentImage == 1) {
+            *image = DepthMark::grayDepth(*image);
         }
         const QString legacy = legacyLayout(m_stereo3DLayout);
         if (!legacy.isEmpty()) {
@@ -534,6 +833,9 @@ public:
         }
         if (!m_stereo3DLayout.isEmpty()) {
             image->setText(QString::fromLatin1(stereo3DLayoutKey), m_stereo3DLayout);
+        }
+        if (!m_depthMark.isEmpty()) {
+            image->setText(DepthMark::depthKey, m_depthMark);
         }
         return true;
     }
@@ -594,16 +896,23 @@ public:
 
     bool supportsOption(ImageOption option) const override
     {
-        return option == Size || option == ImageFormat || option == Quality || option == Description;
+        return option == Size || option == ImageFormat || option == Quality || option == Description
+            || (option == ImageTransformation && isFormat(format(), depthFormat));
     }
 
     QVariant option(ImageOption option) const override
     {
         if (option == Description && scan()) {
-            return m_stereo3DLayout.isEmpty() ? QString() : QString::fromLatin1(stereo3DLayoutKey) + QStringLiteral(": ") + m_stereo3DLayout;
+            return DepthMark::description(m_stereo3DLayout, m_depthMark);
         }
         if (option == Size && scan() && !m_images.isEmpty()) {
-            return QImage::fromData(m_images.first(), "jpeg").size();
+            return imageSize(m_currentImage);
+        }
+        if (option == ImageTransformation && scan()) {
+            // A depth map without an orientation of its own is registered with the picture as stored: it takes the
+            // picture's (Android's Dynamic Depth writer gives its depth JPEG the picture's EXIF orientation).
+            const Transformations current = imageTransformation(m_currentImage);
+            return int(current == TransformationNone && m_currentImage > 0 ? imageTransformation(0) : current);
         }
         if (option == ImageFormat) {
             return QByteArray("jpeg");
@@ -632,7 +941,26 @@ private:
             device()->seek(0);
         }
         const QByteArray data = device()->readAll();
-        if (isFormat(format(), mpoFormat)) {
+        if (isFormat(format(), depthFormat)) {
+            const auto depth = jpegDepth(
+                data,
+                [&data](qint64 pos, qint64 count) {
+                    return data.mid(pos, count);
+                },
+                true);
+            m_images.append(data);
+            m_formats.append(QByteArrayLiteral("jpeg"));
+            if (depth) {
+                m_images.append(depth->depth);
+                m_formats.append(depth->depthFormat);
+                if (!depth->original.isEmpty()) {
+                    m_images.append(depth->original);
+                    m_formats.append(depth->originalFormat);
+                }
+                m_stereo3DLayout = DepthMark::separate;
+                m_depthMark = depth->mark;
+            }
+        } else if (isFormat(format(), mpoFormat)) {
             m_images = splitMpo(data);
             m_stereo3DLayout = mpoStereoLayout(data);
         } else if (data.startsWith("\xff\xd8")) {
@@ -645,9 +973,28 @@ private:
         return !m_images.isEmpty();
     }
 
+    // The size and the transformation of an image, from its header.
+    QSize imageSize(int index) const
+    {
+        QByteArray data = m_images.value(index);
+        QBuffer buffer(&data);
+        buffer.open(QIODevice::ReadOnly);
+        return QImageReader(&buffer, m_formats.value(index, QByteArrayLiteral("jpeg"))).size();
+    }
+
+    Transformations imageTransformation(int index) const
+    {
+        QByteArray data = m_images.value(index);
+        QBuffer buffer(&data);
+        buffer.open(QIODevice::ReadOnly);
+        return QImageReader(&buffer, m_formats.value(index, QByteArrayLiteral("jpeg"))).transformation();
+    }
+
     mutable bool m_scanned = false;
     mutable QList<QByteArray> m_images;
+    mutable QList<QByteArray> m_formats;
     mutable QString m_stereo3DLayout;
+    mutable QString m_depthMark;
     int m_currentImage = 0;
     int m_quality = -1;
 };
@@ -666,7 +1013,7 @@ public:
         if (format.isEmpty() && device && device->isReadable()) {
             const QByteArray data = device->peek(1024 * 1024);
             const JpegHeader header = readJpegHeader(data);
-            if (header.valid && (header.jpsPresent || isStereoMpf(data))) {
+            if (header.valid && (header.jpsPresent || isStereoMpf(data) || jpegDepth(data, reader(device, data), false))) {
                 return CanRead;
             }
         }
@@ -680,10 +1027,39 @@ public:
         if (isFormat(format, jpsFormat) || isFormat(format, mpoFormat)) {
             handler->setFormat(format);
         } else {
-            const bool isMpo = isStereoMpf(device->peek(1024 * 1024));
-            handler->setFormat(isMpo ? QByteArray(mpoFormat.data(), mpoFormat.size()) : QByteArray(jpsFormat.data(), jpsFormat.size()));
+            const QByteArray data = device->peek(1024 * 1024);
+            const JpegHeader header = readJpegHeader(data);
+            if (isStereoMpf(data)) {
+                handler->setFormat(QByteArray(mpoFormat.data(), mpoFormat.size()));
+            } else if (!header.jpsPresent && jpegDepth(data, reader(device, data), false)) {
+                handler->setFormat(QByteArray(depthFormat.data(), depthFormat.size()));
+            } else {
+                handler->setFormat(QByteArray(jpsFormat.data(), jpsFormat.size()));
+            }
         }
         return handler;
+    }
+
+private:
+    // Bytes of the file at any position, for the images that a Multi-Picture Format index places after the first
+    // megabyte: device is moved to them and back.
+    static ReadAt reader(QIODevice *device, const QByteArray &peeked)
+    {
+        return [device, peeked](qint64 pos, qint64 count) {
+            if (pos < 0 || count <= 0) {
+                return QByteArray();
+            }
+            if (pos + count <= peeked.size() || device->isSequential()) {
+                return peeked.mid(pos, count);
+            }
+            const qint64 at = device->pos();
+            QByteArray bytes;
+            if (device->seek(pos)) {
+                bytes = device->read(count);
+            }
+            device->seek(at);
+            return bytes;
+        };
     }
 };
 
